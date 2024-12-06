@@ -1,205 +1,74 @@
-import csv
-from tempfile import NamedTemporaryFile
-import shutil
-import pandas as pd
+from flask import Flask, request, jsonify
 import source_code as sc
 from suggestion import suggest_email_domain
-import whois
 from popular_domains import emailDomains
-import streamlit as st
-from streamlit_extras.metric_cards import style_metric_cards
+import pandas as pd
+import whois
 
-st.set_page_config(
-    page_title="Email verification",
-    page_icon="✅",
-    layout="centered",
-)
+app = Flask(__name__)
 
-def label_email(email):
-    if not sc.is_valid_email(email):
-        return "Invalid"
-    if not sc.has_valid_mx_record(email.split('@')[1]):
-        return "Invalid"
-    if not sc.verify_email(email):
-        return "Unknown"
-    if sc.is_disposable(email.split('@')[1]):
-        return "Risky"
-    return "Valid"
-
-def label_emails(input_file):
-    file_extension = input_file.name.split('.')[-1].lower()
-
-    if file_extension == 'csv':
-        df = process_csv(input_file)
-    elif file_extension == 'xlsx':
-        df = process_xlsx(input_file)
-    elif file_extension == 'txt':
-        df = process_txt(input_file)
+# Helper function for email validation
+def validate_single_email(email):
+    result = {
+        "email": email,
+        "syntaxValidation": sc.is_valid_email(email),
+    }
+    if result["syntaxValidation"]:
+        domain_part = email.split('@')[1]
+        result["MXRecord"] = sc.has_valid_mx_record(domain_part)
+        result["smtpConnection"] = sc.verify_email(email) if result["MXRecord"] else False
+        result["isTemporary"] = sc.is_disposable(domain_part)
+        result["suggestedDomains"] = suggest_email_domain(domain_part, emailDomains)
+        try:
+            whois_info = whois.whois(domain_part)
+            result["domainInfo"] = {
+                "registrar": whois_info.registrar,
+                "server": whois_info.whois_server,
+                "country": whois_info.country,
+            }
+        except:
+            result["domainInfo"] = "Could not retrieve domain information"
+        result["status"] = "Valid" if all(
+            [result["syntaxValidation"], result["MXRecord"], result["smtpConnection"], not result["isTemporary"]]
+        ) else "Invalid"
     else:
-        st.warning("Unsupported file format. Please provide a CSV, XLSX, or TXT file.")
+        result["status"] = "Invalid"
+    return result
 
+@app.route('/api/v1/validate', methods=['GET'])
+def validate_email():
+    email = request.args.get('email')
+    if not email:
+        return jsonify({"error": "Email parameter is required"}), 400
+    result = validate_single_email(email)
+    return jsonify(result)
 
-def process_csv(input_file):
-    # Read the uploaded file as a DataFrame
-    if input_file:
-        if isinstance(input_file, str):  # For Streamlit sharing compatibility
-            df = pd.read_csv(input_file, header=None)
+@app.route('/api/v1/bulk-validate', methods=['POST'])
+def bulk_validate():
+    file = request.files.get('file')
+    if not file:
+        return jsonify({"error": "File parameter is required"}), 400
+
+    file_extension = file.filename.split('.')[-1].lower()
+    try:
+        if file_extension == 'csv':
+            df = pd.read_csv(file)
+        elif file_extension == 'xlsx':
+            df = pd.read_excel(file)
+        elif file_extension == 'txt':
+            df = pd.read_csv(file, header=None, names=["email"])
         else:
-            df = pd.read_csv(input_file, header=None)
-        
-        # Create a list to store the results
+            return jsonify({"error": "Unsupported file format. Use CSV, XLSX, or TXT."}), 400
+
         results = []
+        for email in df.iloc[:, 0]:
+            email = email.strip()
+            results.append(validate_single_email(email))
 
-        # Process each row in the input DataFrame
-        for index, row in df.iterrows():
-            email = row[0].strip()
-            label = label_email(email)
-            results.append([email, label])
+        return jsonify(results)
 
-        # Create a new DataFrame for results
-        result_df = pd.DataFrame(results, columns=['Email', 'Label'])
-        result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-        return result_df
-    else:
-        return pd.DataFrame(columns=['Email', 'Label'])
-
-def process_xlsx(input_file):
-    df = pd.read_excel(input_file, header=None)
-    results = []
-
-    for index, row in df.iterrows():
-        email = row[0].strip()
-        label = label_email(email)
-        results.append([email, label])
-
-    result_df = pd.DataFrame(results, columns=['Email', 'Label'])
-    result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-    
-    # Display the results in a table
-    st.dataframe(result_df)
-
-
-def process_txt(input_file):
-    input_text = input_file.read().decode("utf-8").splitlines()
-
-    # Create a list to store the results
-    results = []
-
-    for line in input_text:
-        email = line.strip()
-        label = label_email(email)
-        results.append([email, label])
-
-    # Create a DataFrame for the results
-    result_df = pd.DataFrame(results, columns=['Email', 'Label'])
-    result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-
-    # Display the results in a table
-    st.dataframe(result_df)
-
-def main():
-    with open('style.css') as f:
-        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-        
-    st.title("Email Verification Tool", help="This tool verifies the validity of an email address.")
-    st.info("The result may not be accurate. However, it has 90% accuracy.")
-
-    t1, t2= st.tabs(["Single Email", "Bulk Email Processing"])
-
-    with t1:
-    # Single email verification
-
-        email = st.text_input("Enter an email address:")
-        
-        if st.button("Verify"):
-            with st.spinner('Verifying...'):
-                result = {}
-
-                # Syntax validation
-                result['syntaxValidation'] = sc.is_valid_email(email)
-
-                if result['syntaxValidation']:
-                    domain_part = email.split('@')[1] if '@' in email else ''
-
-                    if not domain_part:
-                        st.error("Invalid email format. Please enter a valid email address.")
-                    else:
-                        # Additional validation for the domain part
-                        if not sc.has_valid_mx_record(domain_part):
-                            st.warning("Not valid: MX record not found.")
-                            suggested_domains = suggest_email_domain(domain_part, emailDomains)
-                            if suggested_domains:
-                                st.info("Suggested Domains:")
-                                for suggested_domain in suggested_domains:
-                                    st.write(suggested_domain)
-                            else:
-                                st.warning("No suggested domains found.")
-                        else:
-                            # MX record validation
-                            result['MXRecord'] = sc.has_valid_mx_record(domain_part)
-
-                            # SMTP validation
-                            if result['MXRecord']:
-                                result['smtpConnection'] = sc.verify_email(email)
-                            else:
-                                result['smtpConnection'] = False
-
-                            # Temporary domain check
-                            result['is Temporary'] = sc.is_disposable(domain_part)
-
-                            # Determine validity status and message
-                            is_valid = (
-                                result['syntaxValidation']
-                                and result['MXRecord']
-                                and result['smtpConnection']
-                                and not result['is Temporary']
-                            )
-
-                            st.markdown("**Result:**")
-
-                            # Display metric cards with reduced text size
-                            col1, col2, col3 = st.columns(3)
-                            col1.metric(label="Syntax", value=result['syntaxValidation'])
-                            col2.metric(label="MxRecord", value=result['MXRecord'])
-                            col3.metric(label="Is Temporary", value=result['is Temporary'])
-            
-                            
-                            # Show SMTP connection status as a warning
-                            if not result['smtpConnection']:
-                                st.warning("SMTP connection not established.")
-                            
-                            # Show domain details in an expander
-                            with st.expander("See Domain Information"):
-                                try:
-                                    dm_info = whois.whois(domain_part)
-                                    st.write("Registrar:", dm_info.registrar)
-                                    st.write("Server:", dm_info.whois_server)
-                                    st.write("Country:", dm_info.country)
-                                except:
-                                    st.error("Domain information retrieval failed.")
-                            
-                            # Show validity message
-                            if is_valid:
-                                st.success(f"{email} is a Valid email")
-                            else:
-                                st.error(f"{email} is a Invalid email")
-                                if result['is Temporary']:
-                                    st.text("It is a disposable email")
-
-    with t2:
-        # Bulk email processing
-        st.header("Bulk Email Processing")
-        input_file = st.file_uploader("Upload a CSV, XLSX, or TXT file", type=["csv", "xlsx", "txt"])
-        if input_file:
-            st.write("Processing...")
-            if input_file.type == 'text/plain':
-                process_txt(input_file)
-            else:
-                df = process_csv(input_file)
-                st.success("Processing completed. Displaying results:")
-                st.dataframe(df)
-
-
+    except Exception as e:
+        return jsonify({"error": f"Failed to process file: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=8000)
