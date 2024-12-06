@@ -5,3 +5,6 @@ streamlit
 streamlit-extras
 jellyfish
 numpy
+pandas
+Flask
+openpyxl
