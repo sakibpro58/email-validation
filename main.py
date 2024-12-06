@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import source_code as sc
 from suggestion import suggest_email_domain
 from popular_domains import emailDomains
-import pandas as pd
 import whois
 
 app = Flask(__name__)
@@ -48,35 +47,6 @@ def validate_email():
         return jsonify({"error": "Email parameter is required"}), 400
     result = validate_single_email(email)
     return jsonify(result)
-
-# Endpoint for bulk email validation
-@app.route('/api/v1/bulk-validate', methods=['POST'])
-def bulk_validate():
-    file = request.files.get('file')
-    if not file:
-        return jsonify({"error": "File parameter is required"}), 400
-
-    file_extension = file.filename.split('.')[-1].lower()
-    try:
-        if file_extension == 'csv':
-            df = pd.read_csv(file)
-        elif file_extension == 'xlsx':
-            df = pd.read_excel(file)
-        elif file_extension == 'txt':
-            df = pd.read_csv(file, header=None, names=["email"])
-        else:
-            return jsonify({"error": "Unsupported file format. Use CSV, XLSX, or TXT."}), 400
-
-        results = []
-        for email in df.iloc[:, 0]:
-            email = email.strip()
-            results.append(validate_single_email(email))
-
-        return jsonify(results)
-
-    except Exception as e:
-        print(f"Error processing bulk file: {e}")
-        return jsonify({"error": f"Failed to process file: {str(e)}"}), 500
 
 # Main application entry point
 if __name__ == "__main__":
